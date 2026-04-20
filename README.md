@@ -89,6 +89,7 @@ Instead of treating a backtest as “proof” of a strategy, the project is desi
 
 ## Project structure
 
+```text
 pairs_trading/
 ├── app.py
 ├── main.py
@@ -103,9 +104,9 @@ pairs_trading/
 ├── requirements.txt
 ├── .gitignore
 └── README.md
-
+```
 ## How it works
-1. Pair screening
+***1. Pair screening***
 
 Candidate pairs are tested on the training segment using:
 
@@ -115,7 +116,7 @@ Candidate pairs are tested on the training segment using:
 
 Only pairs passing these filters move forward.
 
-2. Parameter tuning
+***2. Parameter tuning***
 
 For each candidate pair, the model tests combinations of:
 
@@ -126,7 +127,7 @@ For each candidate pair, the model tests combinations of:
 
 These are tuned on the training period only.
 
-3. Validation ranking
+***3. Validation ranking***
 
 Candidate pairs are then scored on the validation period using metrics such as:
 
@@ -139,7 +140,7 @@ Candidate pairs are then scored on the validation period using metrics such as:
 
 This helps reduce overfitting to the training sample.
 
-4. Dynamic test-period portfolio
+***4. Dynamic test-period portfolio***
 
 During the final test period:
 
@@ -187,30 +188,30 @@ Planned next steps include:
 
 ## Running locally
 
-1. Create a virtual environment
+***1. Create a virtual environment***
 
 Windows:
-
+```
 py -m venv .venv
 .venv\Scripts\Activate.ps1
-
+```
 If PowerShell blocks activation, use:
-
+```
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .venv\Scripts\Activate.ps1
-
-2. Install requirements
-
+```
+***2. Install requirements***
+```
 pip install -r requirements.txt
-
-3. Run the Streamlit app
-
+```
+***3. Run the Streamlit app***
+```
 python -m streamlit run app.py
-
-4. Run the CLI version
-
+```
+***4. Run the CLI version***
+```
 python main.py
-
+```
 ## Example use cases
 
 - exploring whether sector-specific universes produce more stable pairs

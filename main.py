@@ -1,162 +1,116 @@
-# main.py
-
 from __future__ import annotations
 
-from config import (
-    UNIVERSE,
-    BENCHMARK,
-    START_DATE,
-    END_DATE,
-    TRAIN_RATIO,
-    VALIDATION_RATIO,
-    MIN_OBSERVATIONS,
-    MAX_COINTEGRATION_PVALUE,
-    MAX_ADF_PVALUE,
-    MIN_HALF_LIFE,
-    MAX_HALF_LIFE,
-    TOP_N_PAIRS,
-    LOOKBACK_GRID,
-    ENTRY_Z_GRID,
-    EXIT_Z_GRID,
-    STOP_Z_GRID,
-    RECALIBRATION_WINDOW,
-    RECALIBRATION_STEP,
-    INITIAL_CAPITAL,
-    COMMISSION_BPS,
-    SLIPPAGE_BPS,
-    TARGET_PORTFOLIO_VOL,
-    MAX_GROSS_LEVERAGE,
-    MAX_PAIR_WEIGHT,
-    MIN_PAIR_VOL,
-    QUALITY_WEIGHT_STRENGTH,
-    RISK_FREE_RATE,
-    REQUIRE_ENTRY_CROSS,
-    COOLDOWN_DAYS,
-    TREND_LOOKBACK,
-    MAX_TREND_ZSCORE_SLOPE,
-    VOL_FILTER_LOOKBACK,
-    MAX_RECENT_VOL_MULTIPLIER,
-    SAVE_RESULTS,
-    RESULTS_DIR,
-    PLOT_FIGURES,
+from pathlib import Path
+
+import pandas as pd
+
+from src.backtest import run_pair_backtest
+from src.data import DEFAULT_END, DEFAULT_START, DEFAULT_UNIVERSE, download_adjusted_close
+from src.pairs import choose_pairs, screen_pairs
+from src.plots import (
+    plot_drawdowns,
+    plot_equity_curves,
+    plot_pair_comparison,
+    plot_spread_zscore,
+    plot_walk_forward_performance,
 )
-from pipeline import run_research_pipeline
-from reporting import (
-    print_header,
-    print_metrics,
-    print_selected_pairs,
-    print_pair_params,
-    save_outputs,
-    plot_portfolio_results,
-)
+from src.walk_forward import walk_forward_many
+
+OUTPUT_DIR = Path("outputs")
+ENTRY_THRESHOLD = 2.0
+EXIT_THRESHOLD = 0.5
+STOP_THRESHOLD = 3.0
+TRANSACTION_COST_BPS = 5.0
+ROLLING_ZSCORE_WINDOW = 60
+SCREENING_DAYS = 756
+TOP_N_PAIRS = 5
+
+
+def _metrics_row(pair: str, result) -> dict[str, float | str]:
+    return {"pair": pair, **result.metrics}
+
+
+def _print_summary(backtest_results: pd.DataFrame, walk_forward_results: pd.DataFrame) -> None:
+    print("\nSelected pair backtests")
+    print(
+        backtest_results[
+            ["pair", "total_return", "cagr", "sharpe_ratio", "max_drawdown", "number_of_trades", "win_rate"]
+        ].to_string(index=False, float_format=lambda x: f"{x:0.4f}")
+    )
+    print("\nWalk-forward validation")
+    print(
+        walk_forward_results[
+            ["pair", "total_return", "cagr", "sharpe_ratio", "max_drawdown", "number_of_trades"]
+        ].to_string(index=False, float_format=lambda x: f"{x:0.4f}")
+    )
 
 
 def main() -> None:
-    print_header("RUNNING RESEARCH PIPELINE")
+    OUTPUT_DIR.mkdir(exist_ok=True)
 
-    out = run_research_pipeline(
-        universe=UNIVERSE,
-        benchmark_ticker=BENCHMARK,
-        start_date=START_DATE,
-        end_date=END_DATE,
-        train_ratio=TRAIN_RATIO,
-        validation_ratio=VALIDATION_RATIO,
-        min_observations=MIN_OBSERVATIONS,
-        max_coint_pvalue=MAX_COINTEGRATION_PVALUE,
-        max_adf_pvalue=MAX_ADF_PVALUE,
-        min_half_life=MIN_HALF_LIFE,
-        max_half_life=MAX_HALF_LIFE,
-        top_n_pairs=TOP_N_PAIRS,
-        lookback_grid=LOOKBACK_GRID,
-        entry_z_grid=ENTRY_Z_GRID,
-        exit_z_grid=EXIT_Z_GRID,
-        stop_z_grid=STOP_Z_GRID,
-        recalibration_window=RECALIBRATION_WINDOW,
-        recalibration_step=RECALIBRATION_STEP,
-        initial_capital=INITIAL_CAPITAL,
-        commission_bps=COMMISSION_BPS,
-        slippage_bps=SLIPPAGE_BPS,
-        target_portfolio_vol=TARGET_PORTFOLIO_VOL,
-        max_gross_leverage=MAX_GROSS_LEVERAGE,
-        max_pair_weight=MAX_PAIR_WEIGHT,
-        min_pair_vol=MIN_PAIR_VOL,
-        risk_free_rate=RISK_FREE_RATE,
-        cooldown_days=COOLDOWN_DAYS,
-        trend_lookback=TREND_LOOKBACK,
-        max_trend_zscore_slope=MAX_TREND_ZSCORE_SLOPE,
-        vol_filter_lookback=VOL_FILTER_LOOKBACK,
-        max_recent_vol_multiplier=MAX_RECENT_VOL_MULTIPLIER,
-        require_entry_cross=REQUIRE_ENTRY_CROSS,
-        quality_weight_strength=QUALITY_WEIGHT_STRENGTH,
-    )
+    print("Downloading adjusted close data...")
+    prices = download_adjusted_close(DEFAULT_UNIVERSE, DEFAULT_START, DEFAULT_END)
 
-    ranking = out["ranking"]
-    selected_pairs = out["selected_pairs"]
-    pair_params_df = out["pair_params_df"]
-    portfolio_output = out["portfolio_output"]
-    split_summary = out["split_summary"]
+    screening_prices = prices.iloc[: min(SCREENING_DAYS, len(prices))]
+    print(f"Screening pairs on first {len(screening_prices)} observations...")
+    screening = screen_pairs(screening_prices)
+    selected_pairs = choose_pairs(screening, TOP_N_PAIRS)
+    screening.to_csv(OUTPUT_DIR / "pair_screening_results.csv", index=False)
 
-    print_header("SPLIT SUMMARY")
-    print(split_summary)
+    print("Running selected-pair backtests...")
+    backtest_rows: list[dict[str, float | str]] = []
+    daily_returns: list[pd.Series] = []
+    first_result = None
 
-    selected_cols = [
-        c for c in [
-            "ticker_y",
-            "ticker_x",
-            "train_coint_pvalue",
-            "train_adf_pvalue",
-            "train_half_life",
-            "validation_score",
-            "validation_sharpe",
-            "validation_ann_return",
-            "validation_total_return",
-        ]
-        if c in selected_pairs.columns
-    ]
-    print_selected_pairs(selected_pairs[selected_cols])
-
-    param_cols = [
-        c for c in [
-            "pair_name",
-            "ticker_y",
-            "ticker_x",
-            "lookback",
-            "entry_z",
-            "exit_z",
-            "stop_z",
-            "validation_score",
-            "validation_sharpe",
-            "validation_ann_return",
-            "validation_total_return",
-        ]
-        if c in pair_params_df.columns
-    ]
-    print_pair_params(pair_params_df[param_cols])
-
-    print_metrics(portfolio_output.metrics)
-
-    if hasattr(portfolio_output, "selection_log") and portfolio_output.selection_log is not None:
-        print_header("SELECTION LOG (HEAD)")
-        if portfolio_output.selection_log.empty:
-            print("No dynamic selections recorded.")
-        else:
-            print(portfolio_output.selection_log.head(20).to_string(index=False))
-
-    if SAVE_RESULTS:
-        save_outputs(
-            results_dir=RESULTS_DIR,
-            pair_ranking=ranking,
-            selected_pairs=selected_pairs,
-            pair_params=pair_params_df,
-            portfolio_results=portfolio_output.portfolio_results,
-            pair_results=portfolio_output.pair_results,
-            pair_trade_logs=portfolio_output.pair_trade_logs,
-            pair_recalibration_logs=portfolio_output.pair_recalibration_logs,
+    for row in selected_pairs.itertuples(index=False):
+        pair_name = f"{row.ticker_y}/{row.ticker_x}"
+        result = run_pair_backtest(
+            prices=prices,
+            ticker_y=row.ticker_y,
+            ticker_x=row.ticker_x,
+            entry_threshold=ENTRY_THRESHOLD,
+            exit_threshold=EXIT_THRESHOLD,
+            stop_threshold=STOP_THRESHOLD,
+            zscore_window=ROLLING_ZSCORE_WINDOW,
+            transaction_cost_bps=TRANSACTION_COST_BPS,
+            hedge_ratio=float(row.hedge_ratio),
+            intercept=float(row.intercept),
         )
-        print(f"\nSaved outputs to: {RESULTS_DIR}")
+        if first_result is None:
+            first_result = result
+        backtest_rows.append(_metrics_row(pair_name, result))
+        daily_returns.append(result.daily["strategy_return"].rename(pair_name))
 
-    if PLOT_FIGURES:
-        plot_portfolio_results(portfolio_output.portfolio_results)
+    backtest_results = pd.DataFrame(backtest_rows)
+    pair_returns = pd.concat(daily_returns, axis=1).fillna(0.0)
+    pair_returns["portfolio"] = pair_returns.mean(axis=1)
+
+    backtest_results.to_csv(OUTPUT_DIR / "backtest_results.csv", index=False)
+    pair_returns.to_csv(OUTPUT_DIR / "daily_returns.csv", index_label="date")
+
+    print("Running walk-forward validation...")
+    walk_forward_returns, walk_forward_results = walk_forward_many(
+        prices=prices,
+        pairs=selected_pairs,
+        entry_threshold=ENTRY_THRESHOLD,
+        exit_threshold=EXIT_THRESHOLD,
+        stop_threshold=STOP_THRESHOLD,
+        transaction_cost_bps=TRANSACTION_COST_BPS,
+        train_window=252,
+        test_window=63,
+    )
+    walk_forward_results.to_csv(OUTPUT_DIR / "walk_forward_results.csv", index=False)
+
+    print("Generating charts...")
+    plot_equity_curves(pair_returns, OUTPUT_DIR / "equity_curves.png")
+    if first_result is not None:
+        plot_spread_zscore(first_result.daily, OUTPUT_DIR / "spread_zscore.png", ENTRY_THRESHOLD, EXIT_THRESHOLD)
+    plot_drawdowns(pair_returns, OUTPUT_DIR / "drawdowns.png")
+    plot_walk_forward_performance(walk_forward_returns, OUTPUT_DIR / "walk_forward_performance.png")
+    plot_pair_comparison(backtest_results, OUTPUT_DIR / "pair_comparison.png")
+
+    _print_summary(backtest_results, walk_forward_results)
+    print(f"\nSaved CSV and PNG outputs to {OUTPUT_DIR.resolve()}")
 
 
 if __name__ == "__main__":

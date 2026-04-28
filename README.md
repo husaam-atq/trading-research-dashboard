@@ -1,3 +1,5 @@
+***work in progress***
+
 # Trading Research Dashboard: Pairs Trading & Walk-Forward Backtesting
 
 An interactive quant research dashboard for statistical arbitrage and pairs-trading analysis. The project combines yfinance adjusted close data, correlation and Engle-Granger pair screening, OLS hedge-ratio estimation, z-score signal generation, transaction cost modelling, walk-forward validation, and Streamlit visualisation.

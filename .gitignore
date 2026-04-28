@@ -1,5 +1,10 @@
-.venv/
 __pycache__/
-*.pyc
-results/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
 .streamlit/
+
+outputs/*.csv
+outputs/*.json
+!outputs/.gitkeep

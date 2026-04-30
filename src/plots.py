@@ -103,3 +103,42 @@ def plot_trade_return_distribution(trade_log: pd.DataFrame, output_path: Path) -
     ax.set_xlabel("Net trade return")
     ax.grid(True, axis="y", alpha=0.25)
     _finish(fig, output_path)
+
+
+def plot_hedge_mode_comparison(comparison: pd.DataFrame, output_path: Path) -> None:
+    fig, ax = plt.subplots(figsize=(11, 5))
+    if comparison.empty:
+        ax.text(0.5, 0.5, "No hedge mode data", ha="center", va="center")
+    else:
+        pivot = comparison.pivot_table(index="hedge_mode", values="sharpe_ratio", aggfunc="mean")
+        pivot["sharpe_ratio"].plot(kind="bar", ax=ax, color="#1f7a8c")
+    ax.set_title("Average Sharpe by Hedge Mode")
+    ax.grid(True, axis="y", alpha=0.25)
+    _finish(fig, output_path)
+
+
+def plot_nested_selected_portfolio(daily: pd.DataFrame, output_path: Path) -> None:
+    fig, ax = plt.subplots(figsize=(11, 6))
+    for column in daily.columns:
+        equity_curve(daily[column]).plot(ax=ax, label=column)
+    ax.set_title("Robust Selected Portfolio")
+    ax.set_ylabel("Growth of $1")
+    ax.grid(True, alpha=0.25)
+    ax.legend(loc="best", fontsize=8)
+    _finish(fig, output_path)
+
+
+def plot_cost_sensitivity(costs: pd.DataFrame, output_path: Path) -> None:
+    fig, ax = plt.subplots(figsize=(11, 5))
+    if costs.empty:
+        ax.text(0.5, 0.5, "No cost data", ha="center", va="center")
+    else:
+        for strategy, frame in costs.groupby("strategy"):
+            frame = frame.sort_values("transaction_cost_bps")
+            ax.plot(frame["transaction_cost_bps"], frame["sharpe_ratio"], marker="o", label=strategy)
+    ax.set_title("Transaction Cost Sensitivity")
+    ax.set_xlabel("Transaction cost, bps per one-way leg")
+    ax.set_ylabel("Sharpe ratio")
+    ax.grid(True, alpha=0.25)
+    ax.legend(loc="best", fontsize=8)
+    _finish(fig, output_path)

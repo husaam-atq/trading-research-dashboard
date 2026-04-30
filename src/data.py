@@ -28,7 +28,7 @@ DEFAULT_UNIVERSE = [
     "INTC",
 ]
 
-PEER_GROUP_UNIVERSES = {
+STOCK_PEER_GROUPS = {
     "mega_cap_tech": ["AAPL", "MSFT", "GOOGL", "META", "AMZN"],
     "semiconductors": ["NVDA", "AMD", "INTC", "QCOM", "AVGO", "MU"],
     "banks": ["JPM", "BAC", "C", "GS", "MS", "WFC"],
@@ -36,6 +36,33 @@ PEER_GROUP_UNIVERSES = {
     "retail_consumer": ["COST", "WMT", "HD", "LOW", "TGT"],
     "healthcare": ["UNH", "MRK", "PFE", "ABBV", "JNJ"],
 }
+
+ETF_PEER_GROUPS = {
+    "broad_equity": ["SPY", "IVV", "VOO", "VTI", "SCHB"],
+    "nasdaq_growth": ["QQQ", "XLK", "VGT", "IYW"],
+    "international_equity": ["EFA", "VEA", "IEFA", "EEM", "VWO"],
+    "treasuries": ["SHY", "IEI", "IEF", "TLH", "TLT", "GOVT"],
+    "gold": ["GLD", "IAU", "SGOL"],
+    "real_estate": ["VNQ", "SCHH", "IYR"],
+    "energy": ["XLE", "VDE", "XOP", "OIH"],
+    "financials": ["XLF", "VFH", "KBE", "KRE"],
+}
+
+PEER_GROUP_UNIVERSES = STOCK_PEER_GROUPS
+
+
+def research_universes() -> dict[str, dict[str, list[str]]]:
+    return {"stock_peer_groups": STOCK_PEER_GROUPS, "etf_peer_groups": ETF_PEER_GROUPS}
+
+
+def flatten_universes(universes: dict[str, dict[str, list[str]]]) -> list[str]:
+    tickers: list[str] = []
+    for groups in universes.values():
+        for group in groups.values():
+            tickers.extend(group)
+    tickers.append("SPY")
+    return sorted(dict.fromkeys(tickers))
+
 
 DEFAULT_START = "2015-01-01"
 DEFAULT_END = "2024-12-31"

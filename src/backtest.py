@@ -34,6 +34,31 @@ def rolling_hedge_parameters(log_pair: pd.DataFrame, window: int = 252) -> pd.Da
     return pd.DataFrame(records, index=index)
 
 
+def kalman_hedge_parameters(
+    log_pair: pd.DataFrame,
+    process_variance: float = 1e-5,
+    observation_variance: float = 1e-3,
+) -> pd.DataFrame:
+    """Recursive two-state Kalman update for intercept and hedge ratio."""
+    theta = np.array([0.0, 1.0], dtype=float)
+    covariance = np.eye(2) * 1.0
+    process = np.eye(2) * process_variance
+    records: list[dict[str, float]] = []
+
+    for _, row in log_pair.iterrows():
+        x_vec = np.array([1.0, float(row["x"])], dtype=float)
+        covariance = covariance + process
+        prediction = float(x_vec @ theta)
+        innovation = float(row["y"]) - prediction
+        innovation_var = float(x_vec @ covariance @ x_vec.T + observation_variance)
+        gain = covariance @ x_vec.T / innovation_var
+        theta = theta + gain * innovation
+        covariance = covariance - np.outer(gain, x_vec) @ covariance
+        records.append({"intercept": float(theta[0]), "hedge_ratio": float(theta[1])})
+
+    return pd.DataFrame(records, index=log_pair.index)
+
+
 def static_hedge_parameters(
     log_pair: pd.DataFrame,
     hedge_ratio: float | None = None,
@@ -93,6 +118,31 @@ def pair_leg_returns(
     return frame.fillna(0.0)
 
 
+def apply_pair_drawdown_stop(
+    prices: pd.DataFrame,
+    hedge_ratio: pd.Series,
+    position: pd.Series,
+    transaction_cost_bps: float,
+    drawdown_stop: float | None,
+) -> pd.DataFrame:
+    daily = pair_leg_returns(prices, hedge_ratio, position, transaction_cost_bps)
+    if drawdown_stop is None or drawdown_stop >= 0:
+        return daily
+
+    adjusted = position.copy()
+    stopped = False
+    for date, row in daily.iterrows():
+        if stopped:
+            adjusted.loc[date] = 0
+        elif row["drawdown"] <= drawdown_stop:
+            stopped = True
+            adjusted.loc[date] = 0
+    if stopped:
+        daily = pair_leg_returns(prices, hedge_ratio, adjusted, transaction_cost_bps)
+        daily["position"] = adjusted.reindex(daily.index).fillna(0.0)
+    return daily
+
+
 def summarize_trades(daily: pd.DataFrame, pair_name: str) -> pd.DataFrame:
     """Build a trade log from executed positions."""
     records: list[dict[str, object]] = []
@@ -112,11 +162,13 @@ def summarize_trades(daily: pd.DataFrame, pair_name: str) -> pd.DataFrame:
                 "entry_zscore": zscore,
                 "gross_returns": [],
                 "net_returns": [],
+                "costs": [],
             }
 
         if current is not None:
             current["gross_returns"].append(float(row["strategy_return_gross"]))
             current["net_returns"].append(float(row["strategy_return"]))
+            current["costs"].append(float(row["trading_cost"]))
 
         exit_reason = str(row.get("realized_exit_reason", ""))
         should_close = current is not None and previous_position != 0 and position == 0
@@ -136,6 +188,7 @@ def summarize_trades(daily: pd.DataFrame, pair_name: str) -> pd.DataFrame:
                     "gross_return": float((1.0 + gross_returns).prod() - 1.0),
                     "net_return": float((1.0 + net_returns).prod() - 1.0),
                     "exit_reason": exit_reason or "mean_reversion",
+                    "transaction_cost": float(pd.Series(current["costs"], dtype=float).sum()),
                 }
             )
             current = None
@@ -148,6 +201,7 @@ def summarize_trades(daily: pd.DataFrame, pair_name: str) -> pd.DataFrame:
                 "entry_zscore": zscore,
                 "gross_returns": [float(row["strategy_return_gross"])],
                 "net_returns": [float(row["strategy_return"])],
+                "costs": [float(row["trading_cost"])],
             }
 
         previous_position = position
@@ -167,6 +221,7 @@ def summarize_trades(daily: pd.DataFrame, pair_name: str) -> pd.DataFrame:
                 "gross_return": float((1.0 + gross_returns).prod() - 1.0),
                 "net_return": float((1.0 + net_returns).prod() - 1.0),
                 "exit_reason": "time_stop",
+                "transaction_cost": float(pd.Series(current["costs"], dtype=float).sum()),
             }
         )
 
@@ -183,6 +238,7 @@ def trade_metrics(daily: pd.DataFrame, trades: pd.DataFrame) -> dict[str, float]
         "profit_factor": 0.0,
         "stop_loss_exit_pct": 0.0,
         "time_stop_exit_pct": 0.0,
+        "mean_reversion_exit_pct": 0.0,
         "turnover": float(daily["position_change"].sum()),
         "transaction_cost_impact": float(daily["trading_cost"].sum()),
     }
@@ -201,6 +257,7 @@ def trade_metrics(daily: pd.DataFrame, trades: pd.DataFrame) -> dict[str, float]
             "profit_factor": float(winners / abs(losers)) if losers < 0 else float("inf") if winners > 0 else 0.0,
             "stop_loss_exit_pct": float((trades["exit_reason"] == "stop_loss").mean()),
             "time_stop_exit_pct": float((trades["exit_reason"] == "time_stop").mean()),
+            "mean_reversion_exit_pct": float((trades["exit_reason"] == "mean_reversion").mean()),
         }
     )
     return base
@@ -221,7 +278,10 @@ def run_pair_backtest(
     hedge_ratio: float | None = None,
     intercept: float | None = None,
     volatility_limit: float | None = None,
+    volatility_percentile: float = 0.90,
+    use_volatility_filter: bool = True,
     fit_window: int | None = None,
+    pair_drawdown_stop: float | None = None,
 ) -> BacktestResult:
     pair_name = f"{ticker_y}/{ticker_x}"
     pair = prices[[ticker_y, ticker_x]].dropna().copy()
@@ -230,17 +290,19 @@ def run_pair_backtest(
 
     if hedge_mode == "rolling":
         hedge_params = rolling_hedge_parameters(log_pair, hedge_training_window)
+    elif hedge_mode == "kalman":
+        hedge_params = kalman_hedge_parameters(log_pair)
     elif hedge_mode == "static":
         hedge_params = static_hedge_parameters(log_pair, hedge_ratio, intercept, fit_window)
     else:
-        raise ValueError("hedge_mode must be 'static' or 'rolling'.")
+        raise ValueError("hedge_mode must be 'static', 'rolling', or 'kalman'.")
 
     spread = calculate_dynamic_spread(log_pair, hedge_params)
     zscore = rolling_zscore(spread, zscore_window)
     if volatility_limit is None:
         training_spread = spread.iloc[:fit_window] if fit_window else spread
-        volatility_limit = training_volatility_limit(training_spread, zscore_window)
-    can_enter = volatility_entry_filter(spread, zscore_window, volatility_limit)
+        volatility_limit = training_volatility_limit(training_spread, zscore_window, volatility_percentile)
+    can_enter = volatility_entry_filter(spread, zscore_window, volatility_limit) if use_volatility_filter else pd.Series(True, index=spread.index)
     position, exit_reasons = generate_positions_with_reasons(
         zscore=zscore,
         entry_threshold=entry_threshold,
@@ -250,7 +312,7 @@ def run_pair_backtest(
         max_holding_period=max_holding_period,
     )
 
-    daily = pair_leg_returns(pair, hedge_params["hedge_ratio"], position, transaction_cost_bps)
+    daily = apply_pair_drawdown_stop(pair, hedge_params["hedge_ratio"], position, transaction_cost_bps, pair_drawdown_stop)
     daily["spread"] = spread.reindex(daily.index)
     daily["zscore"] = zscore.reindex(daily.index)
     daily["signal_zscore"] = daily["zscore"].shift(1)

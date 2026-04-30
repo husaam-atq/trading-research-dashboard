@@ -5,7 +5,7 @@ from itertools import combinations
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
-from statsmodels.tsa.stattools import coint
+from statsmodels.tsa.stattools import adfuller, coint
 
 from .signals import count_threshold_crossings, rolling_zscore
 
@@ -50,6 +50,47 @@ def estimate_half_life(spread: pd.Series) -> float:
     return float(half_life)
 
 
+def ou_diagnostics(spread: pd.Series) -> dict[str, float]:
+    """Estimate simple AR(1)/OU diagnostics for a residual spread."""
+    clean = spread.dropna()
+    lagged = clean.shift(1)
+    current = clean
+    frame = pd.concat([current, lagged], axis=1).dropna()
+    if len(frame) < 30:
+        return {
+            "ar1_coefficient": np.nan,
+            "mean_reversion_speed": np.nan,
+            "half_life": np.nan,
+            "equilibrium_mean": np.nan,
+            "residual_volatility": np.nan,
+        }
+    model = sm.OLS(frame.iloc[:, 0], sm.add_constant(frame.iloc[:, 1])).fit()
+    intercept = float(model.params.iloc[0])
+    phi = float(model.params.iloc[1])
+    residual_vol = float(model.resid.std(ddof=0))
+    if 0 < phi < 1:
+        speed = float(-np.log(phi))
+        half_life = float(np.log(2.0) / speed) if speed > 0 else np.nan
+        equilibrium = float(intercept / (1.0 - phi))
+    else:
+        speed = np.nan
+        half_life = np.nan
+        equilibrium = np.nan
+    return {
+        "ar1_coefficient": phi,
+        "mean_reversion_speed": speed,
+        "half_life": half_life,
+        "equilibrium_mean": equilibrium,
+        "residual_volatility": residual_vol,
+    }
+
+
+def half_life_z_window(half_life: float, minimum: int = 20, maximum: int = 90) -> int:
+    if pd.isna(half_life) or not np.isfinite(half_life):
+        return 60
+    return int(min(maximum, max(minimum, round(2.0 * half_life))))
+
+
 def analyse_pair(y: pd.Series, x: pd.Series, zscore_window: int = 60, entry_threshold: float = 2.0) -> dict[str, float]:
     """Calculate correlation, Engle-Granger p-value, hedge ratio, and spread stats."""
     frame = pd.concat([y, x], axis=1).dropna()
@@ -59,21 +100,29 @@ def analyse_pair(y: pd.Series, x: pd.Series, zscore_window: int = 60, entry_thre
     corr = float(log_y.corr(log_x))
     hedge_ratio, intercept = estimate_hedge_ratio(log_y, log_x)
     spread = calculate_spread(log_y, log_x, hedge_ratio, intercept)
-    zscore = rolling_zscore(spread, zscore_window)
+    ou = ou_diagnostics(spread)
+    effective_window = half_life_z_window(ou["half_life"]) if zscore_window <= 0 else zscore_window
+    zscore = rolling_zscore(spread, effective_window)
 
     try:
         _, pvalue, _ = coint(log_y, log_x, autolag="AIC")
         coint_pvalue = float(pvalue)
     except Exception:
         coint_pvalue = np.nan
+    try:
+        adf_pvalue = float(adfuller(spread.dropna(), autolag="AIC")[1])
+    except Exception:
+        adf_pvalue = np.nan
 
-    half_life = estimate_half_life(spread)
     return {
         "correlation": corr,
         "coint_pvalue": coint_pvalue,
+        "adf_pvalue": adf_pvalue,
         "hedge_ratio": hedge_ratio,
         "intercept": intercept,
-        "half_life": half_life,
+        **ou,
+        "half_life": ou["half_life"],
+        "suggested_zscore_window": float(half_life_z_window(ou["half_life"])),
         "threshold_crossings": float(count_threshold_crossings(zscore, entry_threshold)),
         "spread_mean": float(spread.mean()),
         "spread_std": float(spread.std(ddof=0)),
@@ -86,9 +135,10 @@ def screen_pairs(
     peer_group: str = "default",
     min_abs_correlation: float = 0.80,
     max_coint_pvalue: float = 0.05,
-    min_half_life: float = 5.0,
-    max_half_life: float = 60.0,
-    min_threshold_crossings: int = 4,
+    max_adf_pvalue: float = 0.05,
+    min_half_life: float = 3.0,
+    max_half_life: float = 45.0,
+    min_threshold_crossings: int = 8,
     zscore_window: int = 60,
     entry_threshold: float = 2.0,
 ) -> pd.DataFrame:
@@ -107,6 +157,8 @@ def screen_pairs(
         passed_correlation = abs(float(stats["correlation"])) >= min_abs_correlation
         pvalue = float(stats["coint_pvalue"]) if pd.notna(stats["coint_pvalue"]) else np.nan
         passed_cointegration = pd.notna(pvalue) and pvalue <= max_coint_pvalue
+        adf_pvalue = float(stats["adf_pvalue"]) if pd.notna(stats["adf_pvalue"]) else np.nan
+        passed_adf = pd.notna(adf_pvalue) and adf_pvalue <= max_adf_pvalue
         half_life = float(stats["half_life"]) if pd.notna(stats["half_life"]) else np.nan
         passed_half_life = pd.notna(half_life) and min_half_life <= half_life <= max_half_life
         crossings = int(stats["threshold_crossings"])
@@ -119,10 +171,11 @@ def screen_pairs(
                 **stats,
                 "passed_correlation": bool(passed_correlation),
                 "passed_cointegration": bool(passed_cointegration),
+                "passed_adf": bool(passed_adf),
                 "passed_half_life": bool(passed_half_life),
                 "passed_crossings": bool(passed_crossings),
                 "selected_candidate": bool(
-                    passed_correlation and passed_cointegration and passed_half_life and passed_crossings
+                    passed_correlation and passed_cointegration and passed_adf and passed_half_life and passed_crossings
                 ),
             }
         )
@@ -173,8 +226,8 @@ def choose_pairs(screening_results: pd.DataFrame, top_n: int = 5) -> pd.DataFram
         return selected
 
     fallback = screening_results.sort_values(
-        ["passed_correlation", "passed_cointegration", "passed_half_life", "passed_crossings", "coint_pvalue"],
-        ascending=[False, False, False, False, True],
+        ["passed_correlation", "passed_cointegration", "passed_adf", "passed_half_life", "passed_crossings", "coint_pvalue"],
+        ascending=[False, False, False, False, False, True],
         na_position="last",
     ).head(top_n).copy()
     fallback["selection_method"] = "diagnostic_fallback_no_strict_survivors"

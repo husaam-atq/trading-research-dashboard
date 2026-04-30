@@ -6,15 +6,16 @@ import pandas as pd
 import streamlit as st
 
 from src.backtest import run_pair_backtest
-from src.data import DEFAULT_END, DEFAULT_START, PEER_GROUP_UNIVERSES, download_adjusted_close
-from src.pairs import analyse_pair
+from src.data import DEFAULT_END, DEFAULT_START, download_adjusted_close, research_universes
+from src.pairs import analyse_pair, half_life_z_window
 from src.walk_forward import walk_forward_pair
 
-CORRELATION_THRESHOLD = 0.80
+CORRELATION_THRESHOLD = 0.85
 COINTEGRATION_PVALUE_THRESHOLD = 0.05
-MIN_HALF_LIFE = 5.0
-MAX_HALF_LIFE = 60.0
-MIN_THRESHOLD_CROSSINGS = 4
+ADF_PVALUE_THRESHOLD = 0.05
+MIN_HALF_LIFE = 3.0
+MAX_HALF_LIFE = 45.0
+MIN_THRESHOLD_CROSSINGS = 8
 ENTRY_GRID = [1.5, 2.0, 2.5]
 EXIT_GRID = [0.0, 0.5, 1.0]
 STOP_GRID = [3.0, 3.5, 4.0]
@@ -71,20 +72,24 @@ st.caption(
 
 with st.sidebar:
     st.header("Research Controls")
-    peer_group = st.selectbox("Peer group preset", list(PEER_GROUP_UNIVERSES.keys()))
-    tickers = tuple(PEER_GROUP_UNIVERSES[peer_group])
+    universes = research_universes()
+    universe_mode = st.radio("Universe mode", list(universes.keys()), horizontal=True)
+    peer_group = st.selectbox("Peer group preset", list(universes[universe_mode].keys()))
+    tickers = tuple(universes[universe_mode][peer_group])
     pairs = [f"{a}/{b}" for a, b in combinations(tickers, 2)]
     pair_choice = st.selectbox("Ticker pair", pairs)
     ticker_y, ticker_x = pair_choice.split("/")
     start_date = st.date_input("Start date", pd.to_datetime(DEFAULT_START))
     end_date = st.date_input("End date", pd.to_datetime(DEFAULT_END))
-    hedge_mode = st.radio("Hedge ratio", ["static", "rolling"], horizontal=True)
+    hedge_mode = st.radio("Hedge ratio", ["static", "rolling", "kalman"], horizontal=True)
     entry_threshold = st.slider("Entry z-score", 1.0, 3.5, 2.0, 0.1)
     exit_threshold = st.slider("Exit z-score", 0.0, 1.5, 0.5, 0.1)
     stop_threshold = st.slider("Stop z-score", 2.5, 5.0, 3.0, 0.1)
     max_holding_period = st.slider("Max holding period", 5, 60, 20, 1)
     transaction_cost_bps = st.slider("Transaction cost, bps per one-way trade", 0.0, 25.0, 5.0, 0.5)
-    zscore_window = st.slider("Rolling z-score window", 20, 180, 60, 5)
+    zscore_window_mode = st.radio("Z-score window mode", ["half-life based", "fixed"], horizontal=True)
+    fixed_zscore_window = st.slider("Fixed z-score window", 20, 180, 60, 5)
+    use_volatility_filter = st.checkbox("Volatility filter", value=True)
 
 if exit_threshold >= entry_threshold:
     st.error("Exit threshold must be below the entry threshold.")
@@ -96,7 +101,8 @@ if stop_threshold <= entry_threshold:
 
 with st.spinner("Downloading adjusted close data and running the selected pair..."):
     prices = load_prices(tuple(sorted(set(tickers) | {"SPY"})), str(start_date), str(end_date))
-    pair_stats = analyse_pair(prices[ticker_y], prices[ticker_x], zscore_window, entry_threshold)
+    pair_stats = analyse_pair(prices[ticker_y], prices[ticker_x], 0, entry_threshold)
+    zscore_window = half_life_z_window(pair_stats["half_life"]) if zscore_window_mode == "half-life based" else fixed_zscore_window
     result = run_pair_backtest(
         prices,
         ticker_y,
@@ -110,6 +116,7 @@ with st.spinner("Downloading adjusted close data and running the selected pair..
         hedge_mode=hedge_mode,
         hedge_training_window=252,
         fit_window=min(756, len(prices)),
+        use_volatility_filter=use_volatility_filter,
     )
 
 daily = result.daily
@@ -128,23 +135,30 @@ diagnostics = pd.DataFrame(
     {
         "Statistic": [
             "Peer group",
+            "Universe mode",
             "Correlation",
             "Engle-Granger p-value",
+            "ADF p-value",
             "Half-life",
+            "Z-score window",
             "Threshold crossings",
             "Latest hedge ratio",
             "Filter pass",
         ],
         "Value": [
             peer_group,
+            universe_mode,
             num(pair_stats["correlation"]),
             num(pair_stats["coint_pvalue"]),
+            num(pair_stats["adf_pvalue"]),
             num(pair_stats["half_life"]) if pd.notna(pair_stats["half_life"]) else "n/a",
+            str(zscore_window),
             f"{int(pair_stats['threshold_crossings'])}",
             num(metrics["hedge_ratio"]),
             str(
                 abs(pair_stats["correlation"]) >= CORRELATION_THRESHOLD
                 and pair_stats["coint_pvalue"] <= COINTEGRATION_PVALUE_THRESHOLD
+                and pair_stats["adf_pvalue"] <= ADF_PVALUE_THRESHOLD
                 and pd.notna(pair_stats["half_life"])
                 and MIN_HALF_LIFE <= pair_stats["half_life"] <= MAX_HALF_LIFE
                 and pair_stats["threshold_crossings"] >= MIN_THRESHOLD_CROSSINGS
@@ -161,9 +175,14 @@ st.line_chart(price_chart)
 
 chart_left, chart_right = st.columns(2)
 with chart_left:
+    st.subheader("Hedge Ratio")
+    st.line_chart(daily["hedge_ratio"])
+with chart_right:
     st.subheader("Spread")
     st.line_chart(daily["spread"])
-with chart_right:
+
+chart_left, chart_right = st.columns(2)
+with chart_left:
     st.subheader("Z-Score")
     z_frame = pd.DataFrame(
         {
@@ -176,6 +195,9 @@ with chart_right:
         index=daily.index,
     )
     st.line_chart(z_frame)
+with chart_right:
+    st.subheader("Entry Filter")
+    st.line_chart(daily["can_enter"].astype(float))
 
 curve_left, curve_right = st.columns(2)
 with curve_left:
@@ -195,6 +217,7 @@ trade_summary = pd.DataFrame(
             "profit_factor": metrics["profit_factor"],
             "stop_loss_exit_pct": metrics["stop_loss_exit_pct"],
             "time_stop_exit_pct": metrics["time_stop_exit_pct"],
+            "mean_reversion_exit_pct": metrics["mean_reversion_exit_pct"],
         }
     ]
 )

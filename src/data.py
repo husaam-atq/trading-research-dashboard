@@ -28,6 +28,15 @@ DEFAULT_UNIVERSE = [
     "INTC",
 ]
 
+PEER_GROUP_UNIVERSES = {
+    "mega_cap_tech": ["AAPL", "MSFT", "GOOGL", "META", "AMZN"],
+    "semiconductors": ["NVDA", "AMD", "INTC", "QCOM", "AVGO", "MU"],
+    "banks": ["JPM", "BAC", "C", "GS", "MS", "WFC"],
+    "energy": ["XOM", "CVX", "COP", "EOG", "SLB"],
+    "retail_consumer": ["COST", "WMT", "HD", "LOW", "TGT"],
+    "healthcare": ["UNH", "MRK", "PFE", "ABBV", "JNJ"],
+}
+
 DEFAULT_START = "2015-01-01"
 DEFAULT_END = "2024-12-31"
 

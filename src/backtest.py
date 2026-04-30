@@ -85,6 +85,42 @@ def volatility_entry_filter(spread: pd.Series, lookback: int, volatility_limit: 
     return (rolling_vol <= volatility_limit).fillna(False)
 
 
+def combined_entry_filter(
+    spread: pd.Series,
+    zscore: pd.Series,
+    log_pair: pd.DataFrame,
+    hedge_ratio: pd.Series,
+    lookback: int,
+    volatility_limit: float,
+    transaction_cost_bps: float,
+    edge_threshold: float = 0.0,
+    use_volatility_filter: bool = True,
+    use_correlation_filter: bool = False,
+    use_trend_filter: bool = False,
+    min_recent_correlation: float = 0.70,
+) -> pd.Series:
+    can_enter = pd.Series(True, index=spread.index)
+    recent_vol = spread.diff().rolling(lookback).std(ddof=0)
+    if use_volatility_filter:
+        can_enter &= recent_vol <= volatility_limit
+
+    if edge_threshold > 0:
+        edge = zscore.abs() / recent_vol.replace(0.0, np.nan)
+        cost_hurdle = (transaction_cost_bps / 10000.0) * (1.0 + hedge_ratio.abs()) * 100.0
+        can_enter &= edge >= (edge_threshold + cost_hurdle)
+
+    if use_correlation_filter:
+        recent_corr = log_pair["y"].rolling(63).corr(log_pair["x"])
+        can_enter &= recent_corr >= min_recent_correlation
+
+    if use_trend_filter:
+        trend_std = spread.rolling(60).std(ddof=0).replace(0.0, np.nan)
+        trend_score = (spread.rolling(60).mean() - spread.rolling(60).mean().shift(20)).abs() / trend_std
+        can_enter &= trend_score <= 0.75
+
+    return can_enter.fillna(False)
+
+
 def training_volatility_limit(spread: pd.Series, lookback: int, percentile: float = 0.90) -> float:
     vol = spread.diff().rolling(lookback).std(ddof=0).dropna()
     if vol.empty:
@@ -280,6 +316,10 @@ def run_pair_backtest(
     volatility_limit: float | None = None,
     volatility_percentile: float = 0.90,
     use_volatility_filter: bool = True,
+    use_correlation_filter: bool = False,
+    use_trend_filter: bool = False,
+    edge_threshold: float = 0.0,
+    cooldown_days: int = 0,
     fit_window: int | None = None,
     pair_drawdown_stop: float | None = None,
 ) -> BacktestResult:
@@ -302,7 +342,19 @@ def run_pair_backtest(
     if volatility_limit is None:
         training_spread = spread.iloc[:fit_window] if fit_window else spread
         volatility_limit = training_volatility_limit(training_spread, zscore_window, volatility_percentile)
-    can_enter = volatility_entry_filter(spread, zscore_window, volatility_limit) if use_volatility_filter else pd.Series(True, index=spread.index)
+    can_enter = combined_entry_filter(
+        spread=spread,
+        zscore=zscore,
+        log_pair=log_pair,
+        hedge_ratio=hedge_params["hedge_ratio"],
+        lookback=zscore_window,
+        volatility_limit=volatility_limit,
+        transaction_cost_bps=transaction_cost_bps,
+        edge_threshold=edge_threshold,
+        use_volatility_filter=use_volatility_filter,
+        use_correlation_filter=use_correlation_filter,
+        use_trend_filter=use_trend_filter,
+    )
     position, exit_reasons = generate_positions_with_reasons(
         zscore=zscore,
         entry_threshold=entry_threshold,
@@ -310,6 +362,7 @@ def run_pair_backtest(
         stop_threshold=stop_threshold,
         can_enter=can_enter,
         max_holding_period=max_holding_period,
+        cooldown_days=cooldown_days,
     )
 
     daily = apply_pair_drawdown_stop(pair, hedge_params["hedge_ratio"], position, transaction_cost_bps, pair_drawdown_stop)

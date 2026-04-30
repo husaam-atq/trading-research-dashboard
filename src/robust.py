@@ -7,6 +7,7 @@ import pandas as pd
 
 from .backtest import (
     calculate_dynamic_spread,
+    combined_entry_filter,
     kalman_hedge_parameters,
     pair_leg_returns,
     rolling_hedge_parameters,
@@ -142,6 +143,10 @@ def _run_window_result(
     use_vol_filter: bool,
     vol_percentile: float,
     pair_drawdown_stop: float | None = -0.15,
+    edge_threshold: float = 0.0,
+    use_correlation_filter: bool = False,
+    use_trend_filter: bool = False,
+    cooldown_days: int = 0,
 ) -> object:
     return run_pair_backtest(
         prices,
@@ -158,6 +163,10 @@ def _run_window_result(
         use_volatility_filter=use_vol_filter,
         volatility_percentile=vol_percentile,
         pair_drawdown_stop=pair_drawdown_stop,
+        edge_threshold=edge_threshold,
+        use_correlation_filter=use_correlation_filter,
+        use_trend_filter=use_trend_filter,
+        cooldown_days=cooldown_days,
     )
 
 
@@ -306,6 +315,10 @@ def _validation_grid_for_candidate(
     cost_bps: float,
     use_vol_filter: bool,
     vol_percentiles: tuple[float, ...],
+    edge_threshold: float = 0.0,
+    use_correlation_filter: bool = False,
+    use_trend_filter: bool = False,
+    cooldown_days: int = 0,
 ) -> list[dict[str, object]]:
     ticker_y = str(row["ticker_y"])
     ticker_x = str(row["ticker_x"])
@@ -331,7 +344,19 @@ def _validation_grid_for_candidate(
     first_pass: list[dict[str, object]] = []
     for vol_pct, entry, exit_, stop, max_hold in candidate_settings:
         vol_limit = training_volatility_limit(train_spread, z_window, vol_pct)
-        can_enter = volatility_entry_filter(spread, z_window, vol_limit) if use_vol_filter else pd.Series(True, index=spread.index)
+        can_enter = combined_entry_filter(
+            spread,
+            zscore,
+            log_pair,
+            hedge_params["hedge_ratio"],
+            z_window,
+            vol_limit,
+            cost_bps,
+            edge_threshold=edge_threshold,
+            use_volatility_filter=use_vol_filter,
+            use_correlation_filter=use_correlation_filter,
+            use_trend_filter=use_trend_filter,
+        )
         position, exit_reasons = generate_positions_with_reasons(
             zscore,
             entry,
@@ -339,6 +364,7 @@ def _validation_grid_for_candidate(
             stop,
             can_enter=can_enter,
             max_holding_period=max_hold,
+            cooldown_days=cooldown_days,
         )
         daily = pair_leg_returns(pair, hedge_params["hedge_ratio"], position, cost_bps)
         daily["zscore"] = zscore
@@ -350,6 +376,16 @@ def _validation_grid_for_candidate(
         validation_trades = trades[pd.to_datetime(trades["exit_date"]).isin(validation_daily.index)] if not trades.empty else pd.DataFrame()
         metrics = performance_metrics(validation_daily["strategy_return"])
         trade_stats = trade_metrics(validation_daily, validation_trades)
+        turnover = float(validation_daily["position_change"].sum())
+        turnover_penalty = turnover / max(float(trade_stats["number_of_trades"]), 1.0)
+        instability_penalty = max(0.0, abs(float(row["half_life"]) - 15.0) / 45.0) + float(row.get("spread_std", 0.0))
+        robust_score = (
+            float(metrics["sharpe_ratio"])
+            + 0.25 * min(float(trade_stats["profit_factor"]), 5.0)
+            - 0.50 * abs(float(metrics["max_drawdown"]))
+            - 0.10 * turnover_penalty
+            - 0.10 * instability_penalty
+        )
         first_pass.append(
             {
                 "pair": row["pair"],
@@ -370,6 +406,22 @@ def _validation_grid_for_candidate(
                 "validation_max_drawdown": float(metrics["max_drawdown"]),
                 "validation_volatility": float(metrics["annualised_volatility"]),
                 "validation_number_of_trades": float(trade_stats["number_of_trades"]),
+                "validation_turnover": turnover,
+                "validation_average_holding_period": float(trade_stats["average_holding_period"]),
+                "validation_win_rate": float(trade_stats["win_rate"]),
+                "spread_half_life": float(row["half_life"]),
+                "spread_volatility": float(row.get("spread_std", np.nan)),
+                "correlation": float(row.get("correlation", np.nan)),
+                "coint_pvalue": float(row.get("coint_pvalue", np.nan)),
+                "adf_pvalue": float(row.get("adf_pvalue", np.nan)),
+                "edge_threshold": edge_threshold,
+                "use_volatility_filter": use_vol_filter,
+                "use_correlation_filter": use_correlation_filter,
+                "use_trend_filter": use_trend_filter,
+                "cooldown_days": cooldown_days,
+                "turnover_penalty": turnover_penalty,
+                "instability_penalty": instability_penalty,
+                "robust_score": robust_score,
             }
         )
     if first_pass:
@@ -392,7 +444,19 @@ def _validation_grid_for_candidate(
             continue
         seen.add(key)
         vol_limit = training_volatility_limit(train_spread, z_window, vol_pct)
-        can_enter = volatility_entry_filter(spread, z_window, vol_limit) if use_vol_filter else pd.Series(True, index=spread.index)
+        can_enter = combined_entry_filter(
+            spread,
+            zscore,
+            log_pair,
+            hedge_params["hedge_ratio"],
+            z_window,
+            vol_limit,
+            cost_bps,
+            edge_threshold=edge_threshold,
+            use_volatility_filter=use_vol_filter,
+            use_correlation_filter=use_correlation_filter,
+            use_trend_filter=use_trend_filter,
+        )
         position, exit_reasons = generate_positions_with_reasons(
             zscore,
             entry,
@@ -400,6 +464,7 @@ def _validation_grid_for_candidate(
             stop,
             can_enter=can_enter,
             max_holding_period=max_hold,
+            cooldown_days=cooldown_days,
         )
         daily = pair_leg_returns(pair, hedge_params["hedge_ratio"], position, cost_bps)
         daily["zscore"] = zscore
@@ -411,6 +476,16 @@ def _validation_grid_for_candidate(
         validation_trades = trades[pd.to_datetime(trades["exit_date"]).isin(validation_daily.index)] if not trades.empty else pd.DataFrame()
         metrics = performance_metrics(validation_daily["strategy_return"])
         trade_stats = trade_metrics(validation_daily, validation_trades)
+        turnover = float(validation_daily["position_change"].sum())
+        turnover_penalty = turnover / max(float(trade_stats["number_of_trades"]), 1.0)
+        instability_penalty = max(0.0, abs(float(row["half_life"]) - 15.0) / 45.0) + float(row.get("spread_std", 0.0))
+        robust_score = (
+            float(metrics["sharpe_ratio"])
+            + 0.25 * min(float(trade_stats["profit_factor"]), 5.0)
+            - 0.50 * abs(float(metrics["max_drawdown"]))
+            - 0.10 * turnover_penalty
+            - 0.10 * instability_penalty
+        )
         records.append(
             {
                 "pair": row["pair"],
@@ -431,6 +506,22 @@ def _validation_grid_for_candidate(
                 "validation_max_drawdown": float(metrics["max_drawdown"]),
                 "validation_volatility": float(metrics["annualised_volatility"]),
                 "validation_number_of_trades": float(trade_stats["number_of_trades"]),
+                "validation_turnover": turnover,
+                "validation_average_holding_period": float(trade_stats["average_holding_period"]),
+                "validation_win_rate": float(trade_stats["win_rate"]),
+                "spread_half_life": float(row["half_life"]),
+                "spread_volatility": float(row.get("spread_std", np.nan)),
+                "correlation": float(row.get("correlation", np.nan)),
+                "coint_pvalue": float(row.get("coint_pvalue", np.nan)),
+                "adf_pvalue": float(row.get("adf_pvalue", np.nan)),
+                "edge_threshold": edge_threshold,
+                "use_volatility_filter": use_vol_filter,
+                "use_correlation_filter": use_correlation_filter,
+                "use_trend_filter": use_trend_filter,
+                "cooldown_days": cooldown_days,
+                "turnover_penalty": turnover_penalty,
+                "instability_penalty": instability_penalty,
+                "robust_score": robust_score,
             }
         )
     return records
@@ -450,6 +541,17 @@ def _portfolio_weights(selection: pd.DataFrame, method: str) -> pd.Series:
         weights.index = index
         if weights.sum() <= 0:
             weights = pd.Series(1.0, index=index)
+    elif method == "robust_score_weighted":
+        weights = selection["robust_score"].clip(lower=0.0)
+        weights.index = index
+        if weights.sum() <= 0:
+            weights = pd.Series(1.0, index=index)
+    elif method == "risk_capped_inverse_volatility":
+        weights = 1.0 / selection["validation_volatility"].replace(0.0, np.nan).fillna(selection["validation_volatility"].median())
+        weights.index = index
+        max_weight = 0.60 if len(weights) < 3 else 0.40
+        weights = weights / weights.sum()
+        weights = weights.clip(upper=max_weight)
     else:
         weights = selection["validation_sharpe"].clip(lower=0.0)
         weights.index = index
@@ -463,8 +565,8 @@ def _portfolio_weights(selection: pd.DataFrame, method: str) -> pd.Series:
     return weights / total
 
 
-def _risk_scaled_returns(returns: pd.Series, target_vol: float = 0.10, max_leverage: float = 1.5) -> pd.Series:
-    trailing_vol = returns.rolling(21).std(ddof=0) * np.sqrt(252)
+def _risk_scaled_returns(returns: pd.Series, target_vol: float = 0.10, max_leverage: float = 1.5, window: int = 63) -> pd.Series:
+    trailing_vol = returns.rolling(window).std(ddof=0) * np.sqrt(252)
     leverage = (target_vol / trailing_vol.replace(0.0, np.nan)).shift(1).clip(upper=max_leverage).fillna(1.0)
     return returns * leverage
 
@@ -486,8 +588,9 @@ def nested_pair_selection_portfolio(
     vol_percentiles: tuple[float, ...] = (0.80, 0.90),
     candidate_pool: pd.DataFrame | None = None,
     step_size: int | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     selection_records: list[dict[str, object]] = []
+    score_frames: list[pd.DataFrame] = []
     portfolio_returns: list[pd.DataFrame] = []
     test_pair_returns: list[pd.DataFrame] = []
     trade_logs: list[pd.DataFrame] = []
@@ -555,6 +658,10 @@ def nested_pair_selection_portfolio(
                         cost_bps,
                         use_vol_filter,
                         (0.90,),
+                        edge_threshold=0.0,
+                        use_correlation_filter=False,
+                        use_trend_filter=False,
+                        cooldown_days=0,
                     )
                 )
             if not mode_baselines:
@@ -577,6 +684,10 @@ def nested_pair_selection_portfolio(
                     cost_bps,
                     use_vol_filter,
                     vol_percentiles,
+                    edge_threshold=0.0,
+                    use_correlation_filter=False,
+                    use_trend_filter=False,
+                    cooldown_days=0,
                 )
             )
 
@@ -585,14 +696,30 @@ def nested_pair_selection_portfolio(
             start += test_window
             segment += 1
             continue
+        validation_table["segment"] = segment
+        validation_table["train_start"] = train.index[0]
+        validation_table["train_end"] = train.index[-1]
+        validation_table["validation_start"] = validation.index[0]
+        validation_table["validation_end"] = validation.index[-1]
+        validation_table["test_start"] = test.index[0]
+        validation_table["test_end"] = test.index[-1]
+        score_frames.append(validation_table)
         eligible = validation_table[
-            (validation_table["validation_sharpe"] > 0.0)
-            & (validation_table["validation_profit_factor"] > 1.05)
-            & (validation_table["validation_max_drawdown"] > -0.15)
-        ].sort_values(["validation_sharpe", "validation_profit_factor"], ascending=False)
-        selected = eligible.drop_duplicates("pair").head(top_n_pairs)
+            (validation_table["validation_sharpe"] > 0.25)
+            & (validation_table["validation_profit_factor"] > 1.10)
+            & (validation_table["validation_max_drawdown"] > -0.10)
+            & (validation_table["validation_number_of_trades"] >= 4)
+            & (validation_table["validation_average_holding_period"].between(2, 30))
+            & (validation_table["spread_half_life"].between(3, 45))
+            & (validation_table["correlation"] >= 0.85)
+            & (validation_table["coint_pvalue"] <= 0.05)
+            & (validation_table["adf_pvalue"] <= 0.05)
+        ].sort_values(["robust_score", "validation_sharpe", "validation_profit_factor"], ascending=False)
+        breadth_limited = len(eligible.drop_duplicates("pair")) < 2
+        selected = eligible.drop_duplicates("pair").head(top_n_pairs if not breadth_limited else 1)
         if selected.empty:
-            selected = validation_table.sort_values(["validation_sharpe", "validation_profit_factor"], ascending=False).drop_duplicates("pair").head(top_n_pairs)
+            breadth_limited = True
+            selected = validation_table.sort_values(["robust_score", "validation_sharpe", "validation_profit_factor"], ascending=False).drop_duplicates("pair").head(1)
 
         segment_returns: list[pd.Series] = []
         full_test_window = pd.concat([train, validation, test]).dropna()
@@ -610,6 +737,10 @@ def nested_pair_selection_portfolio(
                 cost_bps,
                 use_vol_filter,
                 float(selected_row["volatility_percentile"]),
+                edge_threshold=float(selected_row.get("edge_threshold", 0.0)),
+                use_correlation_filter=bool(selected_row.get("use_correlation_filter", False)),
+                use_trend_filter=bool(selected_row.get("use_trend_filter", False)),
+                cooldown_days=int(selected_row.get("cooldown_days", 0)),
             )
             test_daily = result.daily.loc[result.daily.index.intersection(test.index)]
             pair_label = str(selected_row["pair"])
@@ -634,6 +765,7 @@ def nested_pair_selection_portfolio(
                     "validation_end": validation.index[-1],
                     "test_start": test.index[0],
                     "test_end": test.index[-1],
+                    "breadth_limited": breadth_limited,
                     **selected_row.to_dict(),
                 }
             )
@@ -642,7 +774,7 @@ def nested_pair_selection_portfolio(
             pair_return_frame = pd.concat(segment_returns, axis=1).fillna(0.0)
             test_pair_returns.append(pair_return_frame.add_prefix(f"segment_{segment}_"))
             portfolio_frame = pd.DataFrame(index=pair_return_frame.index)
-            for method in ["equal_weight", "inverse_volatility", "sharpe_weighted", "risk_capped"]:
+            for method in ["equal_weight", "inverse_volatility", "sharpe_weighted", "robust_score_weighted", "risk_capped_inverse_volatility", "risk_capped"]:
                 weights = _portfolio_weights(selected, method)
                 weighted = pair_return_frame.mul(weights.reindex(pair_return_frame.columns).fillna(0.0), axis=1).sum(axis=1)
                 if method == "risk_capped":
@@ -656,6 +788,7 @@ def nested_pair_selection_portfolio(
     daily = pd.concat(portfolio_returns).sort_index() if portfolio_returns else pd.DataFrame()
     nested_pair_returns = pd.concat(test_pair_returns, axis=1).fillna(0.0) if test_pair_returns else pd.DataFrame()
     selection = pd.DataFrame(selection_records)
+    scores = pd.concat(score_frames, ignore_index=True) if score_frames else pd.DataFrame()
     trade_log = pd.concat(trade_logs, ignore_index=True) if trade_logs else pd.DataFrame()
     comparison_records = []
     for column in daily.columns:
@@ -663,7 +796,7 @@ def nested_pair_selection_portfolio(
         comparison_records.append({"portfolio_method": column, **metrics})
     comparison = pd.DataFrame(comparison_records)
     results = comparison.rename(columns={"portfolio_method": "strategy"})
-    return selection, results, daily, nested_pair_returns, trade_log
+    return selection, results, daily, nested_pair_returns, trade_log, scores
 
 
 def cost_sensitivity_from_selection(
@@ -674,6 +807,7 @@ def cost_sensitivity_from_selection(
     rows: list[dict[str, object]] = []
     for cost in costs:
         segment_returns: list[pd.DataFrame] = []
+        total_trades = 0.0
         for segment, segment_selection in selection.groupby("segment"):
             test_start = pd.to_datetime(segment_selection["test_start"].iloc[0])
             test_end = pd.to_datetime(segment_selection["test_end"].iloc[0])
@@ -694,12 +828,18 @@ def cost_sensitivity_from_selection(
                     cost,
                     True,
                     float(selected_row["volatility_percentile"]),
+                    edge_threshold=float(selected_row.get("edge_threshold", 0.0)),
+                    use_correlation_filter=bool(selected_row.get("use_correlation_filter", False)),
+                    use_trend_filter=bool(selected_row.get("use_trend_filter", False)),
+                    cooldown_days=int(selected_row.get("cooldown_days", 0)),
                 )
+                test_trades = result.trades[pd.to_datetime(result.trades["exit_date"]).isin(test_index)] if not result.trades.empty else pd.DataFrame()
+                total_trades += float(len(test_trades))
                 pair_returns.append(result.daily.loc[result.daily.index.intersection(test_index), "strategy_return"].rename(str(selected_row["pair"])))
             if pair_returns:
                 frame = pd.concat(pair_returns, axis=1).fillna(0.0)
                 segment_frame = pd.DataFrame(index=frame.index)
-                for method in ["equal_weight", "inverse_volatility", "sharpe_weighted", "risk_capped"]:
+                for method in ["equal_weight", "inverse_volatility", "sharpe_weighted", "robust_score_weighted", "risk_capped_inverse_volatility", "risk_capped"]:
                     weights = _portfolio_weights(segment_selection, method)
                     weighted = frame.mul(weights.reindex(frame.columns).fillna(0.0), axis=1).sum(axis=1)
                     if method == "risk_capped":
@@ -708,7 +848,19 @@ def cost_sensitivity_from_selection(
                 segment_returns.append(segment_frame)
         daily = pd.concat(segment_returns).sort_index() if segment_returns else pd.DataFrame()
         for column in daily.columns:
-            rows.append({"transaction_cost_bps": cost, "strategy": column, **performance_metrics(daily[column])})
+            returns = daily[column]
+            winners = returns[returns > 0].sum()
+            losers = returns[returns < 0].sum()
+            profit_factor = float(winners / abs(losers)) if losers < 0 else float("inf") if winners > 0 else 0.0
+            rows.append(
+                {
+                    "transaction_cost_bps": cost,
+                    "strategy": column,
+                    **performance_metrics(returns),
+                    "profit_factor": profit_factor,
+                    "number_of_trades": total_trades,
+                }
+            )
     return pd.DataFrame(rows)
 
 

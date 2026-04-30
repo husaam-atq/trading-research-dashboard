@@ -27,6 +27,7 @@ def generate_positions(
     stop_threshold: float = 3.0,
     can_enter: pd.Series | None = None,
     max_holding_period: int = 20,
+    cooldown_days: int = 0,
 ) -> pd.Series:
     """Generate end-of-day target positions from spread z-scores."""
     positions, _ = generate_positions_with_reasons(
@@ -36,6 +37,7 @@ def generate_positions(
         stop_threshold=stop_threshold,
         can_enter=can_enter,
         max_holding_period=max_holding_period,
+        cooldown_days=cooldown_days,
     )
     return positions
 
@@ -47,6 +49,7 @@ def generate_positions_with_reasons(
     stop_threshold: float = 3.0,
     can_enter: pd.Series | None = None,
     max_holding_period: int = 20,
+    cooldown_days: int = 0,
 ) -> tuple[pd.Series, pd.Series]:
     """Generate target positions and exit reasons from end-of-day z-scores."""
     if exit_threshold >= entry_threshold:
@@ -60,6 +63,7 @@ def generate_positions_with_reasons(
 
     current_position = 0
     holding_period = 0
+    cooldown_remaining = 0
     positions: list[int] = []
     exit_reasons: list[str] = []
 
@@ -74,7 +78,9 @@ def generate_positions_with_reasons(
 
         if current_position == 0:
             holding_period = 0
-            if bool(can_enter.loc[date]) and z <= -entry_threshold and abs(z) < stop_threshold:
+            if cooldown_remaining > 0:
+                cooldown_remaining -= 1
+            elif bool(can_enter.loc[date]) and z <= -entry_threshold and abs(z) < stop_threshold:
                 current_position = 1
                 holding_period = 1
             elif bool(can_enter.loc[date]) and z >= entry_threshold and abs(z) < stop_threshold:
@@ -86,6 +92,7 @@ def generate_positions_with_reasons(
                 current_position = 0
                 exit_reason = "stop_loss"
                 holding_period = 0
+                cooldown_remaining = cooldown_days
             elif abs(z) <= exit_threshold:
                 current_position = 0
                 exit_reason = "mean_reversion"
@@ -100,6 +107,7 @@ def generate_positions_with_reasons(
                 current_position = 0
                 exit_reason = "stop_loss"
                 holding_period = 0
+                cooldown_remaining = cooldown_days
             elif abs(z) <= exit_threshold:
                 current_position = 0
                 exit_reason = "mean_reversion"

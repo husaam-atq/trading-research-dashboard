@@ -64,7 +64,8 @@ def plot_walk_forward_performance(walk_forward_returns: pd.DataFrame, output_pat
 
 
 def plot_pair_comparison(backtest_results: pd.DataFrame, output_path: Path) -> None:
-    plot_df = backtest_results.set_index("pair")[["cagr", "sharpe_ratio", "max_drawdown"]].copy()
+    label_col = "label" if "label" in backtest_results.columns else "pair"
+    plot_df = backtest_results.set_index(label_col)[["cagr", "sharpe_ratio", "max_drawdown"]].copy()
     fig, axes = plt.subplots(1, 3, figsize=(13, 4))
     plot_df["cagr"].plot(kind="bar", ax=axes[0], color="#1f7a8c", title="CAGR")
     plot_df["sharpe_ratio"].plot(kind="bar", ax=axes[1], color="#6a994e", title="Sharpe")
@@ -72,4 +73,33 @@ def plot_pair_comparison(backtest_results: pd.DataFrame, output_path: Path) -> N
     for ax in axes:
         ax.grid(True, axis="y", alpha=0.25)
         ax.tick_params(axis="x", rotation=45)
+    _finish(fig, output_path)
+
+
+def plot_threshold_selection(thresholds: pd.DataFrame, output_path: Path) -> None:
+    fig, axes = plt.subplots(1, 3, figsize=(13, 4))
+    for ax, column, title in zip(
+        axes,
+        ["entry_threshold", "exit_threshold", "stop_threshold"],
+        ["Selected Entry", "Selected Exit", "Selected Stop"],
+    ):
+        if thresholds.empty or column not in thresholds:
+            ax.text(0.5, 0.5, "No threshold data", ha="center", va="center")
+        else:
+            thresholds[column].value_counts().sort_index().plot(kind="bar", ax=ax, color="#1f7a8c")
+        ax.set_title(title)
+        ax.grid(True, axis="y", alpha=0.25)
+    _finish(fig, output_path)
+
+
+def plot_trade_return_distribution(trade_log: pd.DataFrame, output_path: Path) -> None:
+    fig, ax = plt.subplots(figsize=(10, 5))
+    if trade_log.empty:
+        ax.text(0.5, 0.5, "No trades", ha="center", va="center")
+    else:
+        trade_log["net_return"].plot(kind="hist", bins=30, ax=ax, color="#6a994e", alpha=0.8)
+        ax.axvline(0, color="black", linewidth=0.8)
+    ax.set_title("Trade Return Distribution")
+    ax.set_xlabel("Net trade return")
+    ax.grid(True, axis="y", alpha=0.25)
     _finish(fig, output_path)

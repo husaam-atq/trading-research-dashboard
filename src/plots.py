@@ -142,3 +142,37 @@ def plot_cost_sensitivity(costs: pd.DataFrame, output_path: Path) -> None:
     ax.grid(True, alpha=0.25)
     ax.legend(loc="best", fontsize=8)
     _finish(fig, output_path)
+
+
+def plot_metric_bars(frame: pd.DataFrame, label_col: str, metric_col: str, output_path: Path, title: str) -> None:
+    fig, ax = plt.subplots(figsize=(11, 5))
+    if frame.empty:
+        ax.text(0.5, 0.5, "No data", ha="center", va="center")
+    else:
+        plot_frame = frame.set_index(label_col)[metric_col]
+        plot_frame.plot(kind="bar", ax=ax, color="#1f7a8c")
+    ax.set_title(title)
+    ax.grid(True, axis="y", alpha=0.25)
+    ax.tick_params(axis="x", rotation=35)
+    _finish(fig, output_path)
+
+
+def plot_vol_target_comparison(pair_results: pd.DataFrame, portfolio_results: pd.DataFrame, output_path: Path) -> None:
+    fig, ax = plt.subplots(figsize=(11, 5))
+    frames = []
+    if not pair_results.empty:
+        frames.append(pair_results.assign(group="pair"))
+    if not portfolio_results.empty:
+        frames.append(portfolio_results.assign(group="portfolio"))
+    if not frames:
+        ax.text(0.5, 0.5, "No vol target data", ha="center", va="center")
+    else:
+        data = pd.concat(frames, ignore_index=True)
+        for group, frame in data.groupby("group"):
+            ax.plot(frame["target_vol"] * 100, frame["sharpe_ratio"], marker="o", label=group)
+    ax.set_title("Volatility Target Comparison")
+    ax.set_xlabel("Target annualised volatility (%)")
+    ax.set_ylabel("Sharpe ratio")
+    ax.grid(True, alpha=0.25)
+    ax.legend(loc="best")
+    _finish(fig, output_path)

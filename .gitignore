@@ -4,6 +4,8 @@ __pycache__/
 venv/
 .ipynb_checkpoints/
 .streamlit/
+.pytest_cache/
+data/cache/
 
 outputs/*.csv
 outputs/*.json

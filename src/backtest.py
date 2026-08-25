@@ -20,18 +20,19 @@ class BacktestResult:
 
 def rolling_hedge_parameters(log_pair: pd.DataFrame, window: int = 252) -> pd.DataFrame:
     """Estimate OLS hedge parameters using only observations before each date."""
-    records: list[dict[str, float]] = []
-    index: list[pd.Timestamp] = []
-    for i in range(len(log_pair)):
-        if i < window:
-            records.append({"hedge_ratio": np.nan, "intercept": np.nan})
-            index.append(log_pair.index[i])
-            continue
-        train = log_pair.iloc[i - window : i]
-        hedge_ratio, intercept = estimate_hedge_ratio(train["y"], train["x"])
-        records.append({"hedge_ratio": hedge_ratio, "intercept": intercept})
-        index.append(log_pair.index[i])
-    return pd.DataFrame(records, index=index)
+    if window < 30:
+        raise ValueError("Rolling hedge window must contain at least 30 observations.")
+
+    # Shift first so every estimate at date t is based on data through t-1.
+    x = log_pair["x"].shift(1)
+    y = log_pair["y"].shift(1)
+    mean_x = x.rolling(window, min_periods=window).mean()
+    mean_y = y.rolling(window, min_periods=window).mean()
+    covariance = (x * y).rolling(window, min_periods=window).mean() - mean_x * mean_y
+    variance = (x * x).rolling(window, min_periods=window).mean() - mean_x * mean_x
+    hedge_ratio = covariance / variance.replace(0.0, np.nan)
+    intercept = mean_y - hedge_ratio * mean_x
+    return pd.DataFrame({"hedge_ratio": hedge_ratio, "intercept": intercept}, index=log_pair.index)
 
 
 def kalman_hedge_parameters(
@@ -322,6 +323,7 @@ def run_pair_backtest(
     cooldown_days: int = 0,
     fit_window: int | None = None,
     pair_drawdown_stop: float | None = None,
+    trade_start: pd.Timestamp | str | None = None,
 ) -> BacktestResult:
     pair_name = f"{ticker_y}/{ticker_x}"
     pair = prices[[ticker_y, ticker_x]].dropna().copy()
@@ -355,15 +357,20 @@ def run_pair_backtest(
         use_correlation_filter=use_correlation_filter,
         use_trend_filter=use_trend_filter,
     )
-    position, exit_reasons = generate_positions_with_reasons(
-        zscore=zscore,
+    active_index = zscore.index
+    if trade_start is not None:
+        active_index = zscore.index[zscore.index >= pd.Timestamp(trade_start)]
+    active_position, active_exit_reasons = generate_positions_with_reasons(
+        zscore=zscore.reindex(active_index),
         entry_threshold=entry_threshold,
         exit_threshold=exit_threshold,
         stop_threshold=stop_threshold,
-        can_enter=can_enter,
+        can_enter=can_enter.reindex(active_index),
         max_holding_period=max_holding_period,
         cooldown_days=cooldown_days,
     )
+    position = active_position.reindex(zscore.index).fillna(0).astype(int)
+    exit_reasons = active_exit_reasons.reindex(zscore.index).fillna("")
 
     daily = apply_pair_drawdown_stop(pair, hedge_params["hedge_ratio"], position, transaction_cost_bps, pair_drawdown_stop)
     daily["spread"] = spread.reindex(daily.index)

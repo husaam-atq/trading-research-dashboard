@@ -1,0 +1,92 @@
+{
+  "evaluation_gates": {
+    "aspirational_net_sharpe": 0.75,
+    "confirmation_period_end": "2026-07-31",
+    "confirmation_period_start": "2025-01-01",
+    "minimum_evidence_trades": 75,
+    "minimum_peer_groups": 5,
+    "minimum_unique_pairs": 10,
+    "preferred_maximum_drawdown": -0.15,
+    "preferred_maximum_pair_pnl_share": 0.25,
+    "preferred_positive_segment_rate": 0.5,
+    "transaction_cost_bps_per_leg": 5.0
+  },
+  "methodology": {
+    "costs": {
+      "annual_short_borrow_rate": 0.0,
+      "borrow_sensitivity_rates": [
+        0.0,
+        0.01,
+        0.03
+      ],
+      "sensitivity_bps": [
+        0.0,
+        1.0,
+        2.0,
+        5.0,
+        10.0
+      ],
+      "transaction_cost_bps_per_leg": 5.0
+    },
+    "discovery": {
+      "correlation_prescreen": 0.75,
+      "maximum_adf_pvalue": 0.1,
+      "maximum_coint_pvalue": 0.1,
+      "maximum_half_life": 60.0,
+      "maximum_validation_candidates": 8,
+      "minimum_correlation": 0.8,
+      "minimum_coverage": 0.95,
+      "minimum_crossings": 6,
+      "minimum_half_life": 2.0,
+      "minimum_subwindow_pass_rate": 0.5,
+      "minimum_training_trades": 4,
+      "subwindow_length": 252
+    },
+    "name": "final_training_ranked_fixed_kalman",
+    "portfolio": {
+      "maximum_leverage": 1.25,
+      "maximum_pair_return_correlation": 0.8,
+      "maximum_pair_weight": 0.35,
+      "maximum_pairs_per_peer_group": 2,
+      "maximum_pairs_per_ticker": 1,
+      "target_volatility": null,
+      "top_n_pairs": 4,
+      "volatility_lookback": 63,
+      "weighting_method": "constrained_inverse_volatility"
+    },
+    "step_size": 63,
+    "test_window": 63,
+    "train_window": 504,
+    "universe_version": "expanded_liquid_peers_v1",
+    "validation": {
+      "entry_thresholds": [
+        2.0
+      ],
+      "exit_thresholds": [
+        0.0
+      ],
+      "hedge_modes": [
+        "kalman"
+      ],
+      "maximum_holding_periods": [
+        20
+      ],
+      "minimum_max_drawdown": -0.15,
+      "minimum_profit_factor": 1.0,
+      "minimum_sharpe": 0.0,
+      "minimum_trades": 2,
+      "pair_selection_method": "training_ranked",
+      "stop_thresholds": [
+        3.5
+      ],
+      "volatility_filter_options": [
+        false
+      ],
+      "volatility_percentile": 0.9,
+      "zscore_multipliers": [
+        1.0
+      ]
+    },
+    "validation_window": 126
+  }
+}

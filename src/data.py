@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+import numpy as np
 import pandas as pd
 import yfinance as yf
 
@@ -75,8 +78,8 @@ def download_adjusted_close(
 ) -> pd.DataFrame:
     """Download adjusted close prices and return a clean wide DataFrame."""
     unique_tickers = list(dict.fromkeys([ticker.strip().upper() for ticker in tickers if ticker.strip()]))
-    if len(unique_tickers) < 2:
-        raise ValueError("At least two tickers are required.")
+    if not unique_tickers:
+        raise ValueError("At least one ticker is required.")
     end_exclusive = (pd.to_datetime(end) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
 
     raw = yf.download(
@@ -101,13 +104,65 @@ def download_adjusted_close(
 
     prices = prices.sort_index()
     prices.index = pd.to_datetime(prices.index)
+    prices = prices[~prices.index.duplicated(keep="last")]
     prices = prices.dropna(axis=1, how="all").dropna(how="all")
     prices = prices.ffill().dropna(axis=1, thresh=max(30, int(len(prices) * 0.8)))
-    prices = prices.dropna()
 
-    if prices.shape[1] < 2:
-        raise ValueError("Fewer than two tickers have usable adjusted close histories.")
+    if prices.shape[1] < 1:
+        raise ValueError("No ticker has a usable adjusted close history.")
 
+    validate_price_data(prices)
+    return prices
+
+
+def validate_price_data(prices: pd.DataFrame) -> None:
+    if prices.empty:
+        raise ValueError("Price data is empty.")
+    if not prices.index.is_monotonic_increasing:
+        raise ValueError("Price dates must be in chronological order.")
+    if prices.index.has_duplicates:
+        raise ValueError("Price dates must be unique.")
+    finite = prices.to_numpy(dtype=float, na_value=np.nan)
+    if np.isinf(finite).any():
+        raise ValueError("Price data contains infinite values.")
+    if (prices <= 0).any(axis=None):
+        raise ValueError("Prices must be positive when present.")
+
+
+def load_or_download_adjusted_close(
+    tickers: list[str],
+    start: str,
+    end: str,
+    cache_path: Path | None = None,
+    refresh: bool = False,
+) -> pd.DataFrame:
+    if cache_path is not None and cache_path.exists() and not refresh:
+        cached = pd.read_csv(cache_path, index_col=0, parse_dates=True)
+        required = set(tickers)
+        covers_period = (
+            not cached.empty
+            and cached.index.min() <= pd.Timestamp(start) + pd.Timedelta(days=10)
+            and cached.index.max() >= pd.Timestamp(end) - pd.Timedelta(days=10)
+        )
+        if covers_period:
+            missing = sorted(required.difference(cached.columns))
+            if missing:
+                try:
+                    additional = download_adjusted_close(missing, start, end)
+                    cached = cached.join(additional, how="outer").sort_index()
+                    cached = cached.loc[:, ~cached.columns.duplicated(keep="last")]
+                    cached.to_csv(cache_path, index_label="date")
+                except ValueError:
+                    pass
+            cached = cached.loc[pd.Timestamp(start) : pd.Timestamp(end)]
+            available = sorted(required.intersection(cached.columns))
+            validate_price_data(cached[available])
+            return cached[available]
+
+    prices = download_adjusted_close(tickers, start, end)
+    if cache_path is not None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        prices.to_csv(cache_path, index_label="date")
     return prices
 
 

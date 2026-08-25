@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+from matplotlib.ticker import PercentFormatter
+import numpy as np
 import pandas as pd
 
 from .metrics import drawdown, equity_curve
@@ -175,4 +177,53 @@ def plot_vol_target_comparison(pair_results: pd.DataFrame, portfolio_results: pd
     ax.set_ylabel("Sharpe ratio")
     ax.grid(True, alpha=0.25)
     ax.legend(loc="best")
+    _finish(fig, output_path)
+
+
+def plot_research_equity_drawdown(returns: pd.Series, output_path: Path, title: str) -> None:
+    clean = returns.fillna(0.0)
+    equity = (1.0 + clean).cumprod()
+    underwater = equity / equity.cummax() - 1.0
+    fig, axes = plt.subplots(2, 1, figsize=(12, 7), sharex=True, gridspec_kw={"height_ratios": [2, 1]})
+    axes[0].plot(equity.index, equity, color="#176b87", linewidth=1.8)
+    axes[0].axhline(1.0, color="#6b7280", linewidth=0.8)
+    axes[0].set_ylabel("Growth of $1")
+    axes[0].set_title(title)
+    axes[1].fill_between(underwater.index, underwater, 0.0, color="#c2413b", alpha=0.75)
+    axes[1].set_ylabel("Drawdown")
+    axes[1].yaxis.set_major_formatter(PercentFormatter(1.0))
+    _finish(fig, output_path)
+
+
+def plot_segment_breadth(segment_metrics: pd.DataFrame, output_path: Path) -> None:
+    fig, axes = plt.subplots(2, 1, figsize=(12, 7), sharex=True)
+    axes[0].bar(segment_metrics["segment"], segment_metrics["total_return"], color=np.where(segment_metrics["total_return"] >= 0, "#27896d", "#c2413b"))
+    axes[0].axhline(0.0, color="#4b5563", linewidth=0.8)
+    axes[0].set_ylabel("OOS return")
+    axes[0].yaxis.set_major_formatter(PercentFormatter(1.0))
+    axes[0].set_title("Walk-Forward Segment Consistency")
+    axes[1].bar(segment_metrics["segment"], segment_metrics["selected_pairs"], color="#176b87")
+    axes[1].set_ylabel("Selected pairs")
+    axes[1].set_xlabel("Segment")
+    _finish(fig, output_path)
+
+
+def plot_pair_contributions(contributions: pd.DataFrame, output_path: Path, top_n: int = 15) -> None:
+    frame = contributions.head(top_n).sort_values("weighted_pnl")
+    fig, ax = plt.subplots(figsize=(11, max(4, len(frame) * 0.38)))
+    colors = np.where(frame["weighted_pnl"] >= 0, "#27896d", "#c2413b")
+    ax.barh(frame["pair"], frame["weighted_pnl"], color=colors)
+    ax.axvline(0.0, color="#4b5563", linewidth=0.8)
+    ax.set_xlabel("Sum of weighted daily returns")
+    ax.set_title("Pair Contribution To OOS P&L")
+    _finish(fig, output_path)
+
+
+def plot_cost_curve(costs: pd.DataFrame, output_path: Path) -> None:
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ax.plot(costs["transaction_cost_bps_per_leg"], costs["sharpe_ratio"], marker="o", color="#176b87", label="Sharpe")
+    ax.axhline(0.0, color="#4b5563", linewidth=0.8)
+    ax.set_xlabel("Transaction cost (bps per leg, one way)")
+    ax.set_ylabel("Sharpe")
+    ax.set_title("Frozen-Selection Cost Sensitivity")
     _finish(fig, output_path)
